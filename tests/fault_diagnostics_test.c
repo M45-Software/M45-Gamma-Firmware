@@ -12,6 +12,7 @@
 #include "m45_error_log.h"
 #include "m45_fault_log.h"
 #include "m45_fault_context.h"
+#include "m45_telemetry_extrema.h"
 #include "m45_log_buffer.h"
 #include "tps546.h"
 
@@ -21,6 +22,11 @@ static unsigned char stored[16384];
 static size_t stored_size;
 static unsigned char slot_data[8][2048];
 static size_t slot_sizes[8];
+static unsigned char ring_data[9][2048];
+static size_t ring_sizes[9];
+static unsigned write_calls, fail_write_at;
+static bool fail_after_write;
+static bool fail_reads;
 static vprintf_like_t log_hook;
 int64_t esp_timer_get_time(void) { return boot_us; }
 time_t time(time_t *out) { if (out) *out = wall_time; return wall_time; }
@@ -34,19 +40,25 @@ static void emit(const char *fmt, ...) { va_list args; va_start(args,fmt); log_h
 size_t strlcpy(char *dst,const char *src,size_t cap) { size_t n=strlen(src); if(cap){size_t len=n<cap-1?n:cap-1;memcpy(dst,src,len);dst[len]=0;}return n; }
 esp_err_t nvs_open(const char *name,int mode,nvs_handle_t *h) { (void)name;(void)mode;*h=1;return ESP_OK; }
 esp_err_t nvs_get_blob(nvs_handle_t h,const char *key,void *out,size_t *size) {
-    (void)h; int slot=strncmp(key,"fault",5)==0?key[5]-'0':-1;
-    size_t bytes=slot<0?stored_size:slot_sizes[slot];
-    const void *data=slot<0?(void *)stored:(void *)slot_data[slot];
+    if (fail_reads) return ESP_FAIL;
+    (void)h; bool ring=strncmp(key,"ring",4)==0;
+    int slot=ring?key[4]-'0':strncmp(key,"fault",5)==0?key[5]-'0':-1;
+    size_t bytes=ring?ring_sizes[slot]:slot<0?stored_size:slot_sizes[slot];
+    const void *data=ring?(void *)ring_data[slot]:slot<0?(void *)stored:(void *)slot_data[slot];
     if(!bytes)return ESP_ERR_NVS_NOT_FOUND;
     if(!out){*size=bytes;return ESP_OK;}
     if(*size<bytes)return ESP_ERR_NVS_INVALID_LENGTH;
     memcpy(out,data,bytes);*size=bytes;return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t h,const char *key,const void *data,size_t size) {
-    (void)h;int slot=strncmp(key,"fault",5)==0?key[5]-'0':-1;
-    if(slot<0){assert(size<=sizeof(stored));memcpy(stored,data,size);stored_size=size;}
+    (void)h;bool ring=strncmp(key,"ring",4)==0;
+    int slot=ring?key[4]-'0':strncmp(key,"fault",5)==0?key[5]-'0':-1;
+    const bool failing=++write_calls==fail_write_at;
+    if(failing && !fail_after_write)return ESP_FAIL;
+    if(ring){assert(slot>=0 && slot<9 && size<=sizeof(ring_data[slot]));memcpy(ring_data[slot],data,size);ring_sizes[slot]=size;}
+    else if(slot<0){assert(size<=sizeof(stored));memcpy(stored,data,size);stored_size=size;}
     else{assert(slot<8 && size<=sizeof(slot_data[slot]));memcpy(slot_data[slot],data,size);slot_sizes[slot]=size;}
-    return ESP_OK;
+    return failing?ESP_FAIL:ESP_OK;
 }
 esp_err_t nvs_erase_key(nvs_handle_t h,const char *key) {
     (void)h;assert(strncmp(key,"fault",5)==0);int slot=key[5]-'0';assert(slot>=0 && slot<8);
@@ -66,6 +78,7 @@ static void snapshot_tests(void)
     TPS546_format_snapshot(&s,text,sizeof(text));
     assert(strstr(text,"IOUT overcurrent"));assert(strstr(text,"power-good lost"));
     assert(strstr(text,"IOUT=33.400A"));assert(strstr(text,"VIN=4.910V"));assert(strstr(text,"IOUT_STATUS=0x80"));
+    assert(strstr(text,"readback (not trip peak):"));
     s.valid=(1U<<TPS546_FIELD_STATUS);s.read_error=ESP_ERR_TIMEOUT;s.failed_command=0x7a;
     TPS546_format_snapshot(&s,text,sizeof(text));
     assert(strstr(text,"ESP_ERR_TIMEOUT (0x107) reading STATUS_VOUT (0x7a)"));
@@ -100,7 +113,7 @@ static void operating_context_tests(void)
     assert(strstr(text, "actual=599.5MHz requested=600MHz"));
     assert(strstr(text, "last operating age=1000ms clock"));
     assert(strstr(text, "commanded=1180mV"));
-    assert(strstr(text, "last TPS age=1000ms VIN=5.1V VOUT=1.18V IOUT=17A VR=57C"));
+    assert(strstr(text, "last validated TPS age=1000ms VIN=5.1V VOUT=1.18V IOUT=17A VR=57C"));
     assert(strstr(text, "last ASIC age=750ms temp=61.25C"));
 
     // An unread/non-finite sample must not replace the last measurement or its age.
@@ -109,7 +122,7 @@ static void operating_context_tests(void)
     // Reinitialization clears live frequency/voltage; retain the prior run.
     m45_fault_context_remember_settings(&context, 12000, 0, 525, 1150, 0);
     m45_fault_context_format(&context, 13000, "TPS546 timeout again", text, sizeof(text));
-    assert(strstr(text, "last TPS age=3000ms VIN=5.1V"));
+    assert(strstr(text, "last validated TPS age=3000ms VIN=5.1V"));
     assert(strstr(text, "last ASIC age=2750ms temp=61.25C"));
     assert(strstr(text, "last operating age=3000ms clock actual=599.5MHz requested=600MHz"));
     assert(strstr(text, "core requested=1175mV commanded=1180mV"));
@@ -150,6 +163,31 @@ static void operating_context_tests(void)
     m45_fault_context_format(NULL, 0, NULL, NULL, 0);
 }
 
+static void extrema_tests(void)
+{
+    m45_telemetry_extrema_t e = {0};
+    m45_telemetry_extrema_vin(&e, NAN);
+    m45_telemetry_extrema_vin(&e, -1);
+    m45_telemetry_extrema_tps_temp(&e, INFINITY);
+    m45_telemetry_extrema_asic_temp(&e, 127.875f);
+    assert(!e.vin_valid && !e.tps_temp_valid && !e.asic_temp_valid);
+    m45_telemetry_extrema_vin(&e, 5.1f);
+    m45_telemetry_extrema_vin(&e, 4.7f);
+    m45_telemetry_extrema_vin(&e, 5.6f);
+    m45_telemetry_extrema_vin(&e, 5.0f);
+    assert(e.vin_min_v == 4.7f && e.vin_max_v == 5.6f);
+    m45_telemetry_extrema_tps_temp(&e, 110);
+    m45_telemetry_extrema_asic_temp(&e, 70);
+    m45_telemetry_extrema_tps_temp(&e, 40);
+    m45_telemetry_extrema_asic_temp(&e, 30);
+    m45_telemetry_extrema_asic_temp(&e, 127.875f);
+    assert(e.tps_temp_max_c == 110 && e.asic_temp_max_c == 70);
+    m45_telemetry_extrema_asic_temp(&e, 127);
+    assert(e.asic_temp_max_c == 127); // Same valid upper boundary as the safety path.
+    m45_telemetry_extrema_vin(&e, 0); // A measured supply collapse is a real low.
+    assert(e.vin_min_v == 0 && e.vin_max_v == 5.6f);
+}
+
 static void persistence_tests(void)
 {
     typedef struct {uint32_t id;uint64_t epoch_seconds;uint32_t uptime_seconds;char message[96];} old_entry;
@@ -179,11 +217,134 @@ static void persistence_tests(void)
     for(int i=0;i<12;i++){boot_us+=6000000;long_text[0]=(char)('a'+i);assert(m45_fault_log_record(long_text)==ESP_OK);}
     assert(stored_size < 32); // Metadata never rewrites a full large history blob.
     size_t stored_total=stored_size;for(int i=0;i<8;i++)stored_total+=slot_sizes[i];
-    assert(stored_total<9000); // Worst-case retained records fit comfortably in 24 KiB NVS.
+    for(int i=0;i<9;i++)stored_total+=ring_sizes[i];
+    assert(stored_total<10000); // Eight records plus a staging slot fit in 24 KiB NVS.
     assert(m45_fault_log_init()==ESP_OK);assert(m45_fault_log_snapshot(entries,8)==8);
     assert(entries[0].message[0]=='l' && entries[7].message[0]=='e');
     assert(m45_fault_log_clear()==ESP_OK);assert(m45_fault_log_init()==ESP_OK);
     assert(m45_fault_log_snapshot(entries,8)==0);
+}
+
+typedef struct {
+    unsigned char metadata[sizeof(stored)], legacy[sizeof(slot_data)], ring[sizeof(ring_data)];
+    size_t metadata_size, legacy_sizes[8], sizes[9];
+} test_nvs_image_t;
+
+static void capture_nvs(test_nvs_image_t *image)
+{
+    memcpy(image->metadata, stored, sizeof(stored)); image->metadata_size = stored_size;
+    memcpy(image->legacy, slot_data, sizeof(slot_data)); memcpy(image->legacy_sizes, slot_sizes, sizeof(slot_sizes));
+    memcpy(image->ring, ring_data, sizeof(ring_data)); memcpy(image->sizes, ring_sizes, sizeof(ring_sizes));
+}
+
+static void restore_nvs(const test_nvs_image_t *image)
+{
+    memcpy(stored, image->metadata, sizeof(stored)); stored_size = image->metadata_size;
+    memcpy(slot_data, image->legacy, sizeof(slot_data)); memcpy(slot_sizes, image->legacy_sizes, sizeof(slot_sizes));
+    memcpy(ring_data, image->ring, sizeof(ring_data)); memcpy(ring_sizes, image->sizes, sizeof(ring_sizes));
+    fail_write_at = write_calls = 0;
+}
+
+static void assert_ordered_history(size_t count)
+{
+    m45_fault_entry_t entries[8];
+    assert(m45_fault_log_snapshot(entries, 8) == count);
+    for (size_t i = 1; i < count; ++i) assert(entries[i-1].id > entries[i].id);
+}
+
+static void interrupted_history_tests(void)
+{
+    test_nvs_image_t *base = malloc(sizeof(*base)); assert(base);
+    assert(m45_fault_log_clear() == ESP_OK);
+    for (int i = 0; i < 8; ++i) {
+        char message[32]; snprintf(message, sizeof(message), "baseline %d", i);
+        assert(m45_fault_log_record(message) == ESP_OK);
+    }
+    capture_nvs(base);
+    m45_fault_entry_t before[8], after[8];
+    assert(m45_fault_log_snapshot(before, 8) == 8);
+    // Fail before/after each of the two durable append writes. Restart sees
+    // exactly the old history or its complete successor, never shifted copies.
+    for (int applied = 0; applied < 2; ++applied) {
+        for (unsigned at = 1; at <= 2; ++at) {
+            restore_nvs(base); assert(m45_fault_log_init() == ESP_OK);
+            fail_write_at = at; fail_after_write = applied;
+            assert(m45_fault_log_record("newest fault") != ESP_OK);
+            assert(m45_fault_log_snapshot(after, 8) == 8);
+            assert(!memcmp(before, after, sizeof(before))); // Failed append preserves RAM.
+            fail_write_at = 0;
+            assert(m45_fault_log_init() == ESP_OK); assert_ordered_history(8);
+            assert(m45_fault_log_snapshot(after, 8) == 8);
+            if (after[0].id == before[0].id) {
+                assert(!memcmp(before, after, sizeof(before)));
+            } else {
+                assert(after[0].id == before[0].id + 1);
+                assert(!strcmp(after[0].message, "newest fault"));
+                assert(!memcmp(before, after + 1, sizeof(before[0]) * 7));
+            }
+            assert(m45_fault_log_record("recovery fault") == ESP_OK);
+            assert(m45_fault_log_init() == ESP_OK); assert_ordered_history(8);
+        }
+        restore_nvs(base); assert(m45_fault_log_init() == ESP_OK);
+        fail_write_at = 1; fail_after_write = applied;
+        assert(m45_fault_log_remove(before[3].id) != ESP_OK);
+        fail_write_at = 0; assert(m45_fault_log_init() == ESP_OK);
+        const size_t remaining = m45_fault_log_snapshot(after, 8);
+        assert(remaining == (applied ? 7U : 8U)); assert_ordered_history(remaining);
+        restore_nvs(base); assert(m45_fault_log_init() == ESP_OK);
+        fail_write_at = 1; fail_after_write = applied;
+        assert(m45_fault_log_clear() != ESP_OK);
+        fail_write_at = 0; assert(m45_fault_log_init() == ESP_OK);
+        assert_ordered_history(applied ? 0 : 8);
+    }
+    // Upgrade a full v0.0.14 slot store, interrupting each migration and append
+    // write. Old keys stay valid until the ring's index has been published.
+    struct { uint32_t magic, next_id; uint8_t count, reserved[3]; } metadata = {
+        .magic = 0x4d343547, .next_id = 9, .count = 8,
+    };
+    memcpy(stored, &metadata, sizeof(metadata)); stored_size = sizeof(metadata);
+    memset(ring_sizes, 0, sizeof(ring_sizes));
+    for (int i = 0; i < 8; ++i) {
+        m45_fault_entry_t entry = {.id = (uint32_t)i + 1, .uptime_seconds = 100};
+        snprintf(entry.message, sizeof(entry.message), "old slot %d", i);
+        slot_sizes[i] = offsetof(m45_fault_entry_t, message) + strlen(entry.message) + 1;
+        memcpy(slot_data[i], &entry, slot_sizes[i]);
+    }
+    capture_nvs(base);
+    for (int applied = 0; applied < 2; ++applied) {
+        for (unsigned at = 1; at <= 3; ++at) {
+            restore_nvs(base); assert(m45_fault_log_init() == ESP_OK);
+            fail_write_at = at; fail_after_write = applied;
+            assert(m45_fault_log_record("upgraded fault") != ESP_OK);
+            fail_write_at = 0;
+            assert(m45_fault_log_init() == ESP_OK); assert_ordered_history(8);
+            assert(m45_fault_log_snapshot(after, 8) == 8);
+            const uint32_t newest = after[0].id;
+            assert(newest == 8 || newest == 9);
+            for (size_t i = 0; i < 8; ++i) assert(after[i].id == newest - i);
+        }
+    }
+    restore_nvs(base);
+    // Recover the duplicate-ID shape produced by the old interrupted rotation.
+    memcpy(slot_data[0], slot_data[1], slot_sizes[1]); slot_sizes[0] = slot_sizes[1];
+    assert(m45_fault_log_init() == ESP_OK); assert_ordered_history(7);
+    assert(m45_fault_log_record("after duplicate recovery") == ESP_OK);
+    assert(write_calls == 3); // Index migration plus two append writes; no full copy.
+    assert(m45_fault_log_init() == ESP_OK); assert_ordered_history(8);
+    fail_reads = true;
+    assert(m45_fault_log_init() == ESP_FAIL);
+    const unsigned writes_before = write_calls;
+    assert(m45_fault_log_record("storage unavailable") == ESP_FAIL);
+    assert(write_calls == writes_before); // A failed restore never publishes empty history.
+    fail_reads = false;
+    assert_ordered_history(8); // Snapshot retries the failed load without losing records.
+    fail_reads = true;
+    assert(m45_fault_log_init() == ESP_FAIL);
+    assert(m45_fault_log_clear() == ESP_OK); // Explicit clear can recover unreadable history.
+    fail_reads = false;
+    assert(m45_fault_log_init() == ESP_OK); assert_ordered_history(0);
+    for (int i = 0; i < 8; ++i) assert(slot_sizes[i] == 0);
+    free(base);
 }
 
 static void error_capture_tests(void)
@@ -217,4 +378,4 @@ static void error_capture_tests(void)
     assert(strstr(entries[0].message,"entry 69"));assert(strstr(entries[63].message,"entry 6"));
     free(entries);
 }
-int main(void){snapshot_tests();operating_context_tests();persistence_tests();error_capture_tests();puts("Fault diagnostics, operating context, persistence/migration, timestamps, and always-on error capture passed.");}
+int main(void){snapshot_tests();operating_context_tests();extrema_tests();persistence_tests();interrupted_history_tests();error_capture_tests();puts("Fault diagnostics, extrema, atomic history/migration interruption, timestamps, and always-on error capture passed.");}

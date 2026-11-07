@@ -503,7 +503,7 @@ wall-clock timestamp is included when available; `uptime_seconds` is always
 included.
 
 ```json
-{"faults":[{"id":4,"epoch_seconds":1786801200,"uptime_seconds":32,"message":"ASIC temperature safety shutdown"}]}
+{"extrema":{"vin_min_v":4.7,"vin_max_v":5.2,"tps_temp_max_c":88,"asic_temp_max_c":70},"faults":[{"id":4,"epoch_seconds":1786801200,"uptime_seconds":32,"message":"ASIC temperature safety shutdown"}]}
 ```
 
 Fault messages contain the specific condition, sampled values, configured
@@ -512,6 +512,28 @@ Read failures include the register and ESP error name/code; unread measurements
 are marked unavailable. `epoch_seconds` is zero if the clock was not synchronized
 when the event occurred. `uptime_seconds` is retained alongside wall time.
 Messages support up to 1023 characters and survive reboot.
+
+`extrema` contains raw observed minimum/maximum input voltage in volts and peak
+TPS/ASIC temperatures in Celsius since the last manual clear. Each field is `null` until a valid
+reading is available. Valid fields from partial and fault-bearing TPS snapshots
+are included. ASIC shutdown, reboot, and fault-history deletion retain the extremes.
+Changes are saved once per second, after safety shutdown, and before normal
+firmware reboot; sudden power loss may lose the latest second of observations.
+These observed values cannot establish a hardware trip peak
+that occurred between polls.
+
+Fault messages distinguish fault-status readback from the last validated TPS
+sample and its age. The latter is retained before validating a fault-bearing
+read; post-trip readback does not overwrite it. Normal readback values do not
+rule out a latched hardware fault.
+
+### `POST /api/extrema/clear`
+
+Commits empty recorded extremes to persistent storage and clears them in RAM.
+Returns `{"ok":true}` on success; a storage failure preserves the current
+recording. Fault history is unaffected. New valid readings start a new recording
+period immediately, so subsequent `GET /api/faults` responses may already contain
+new values rather than `null`.
 
 ### `GET /api/errors`
 

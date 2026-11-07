@@ -1,0 +1,72 @@
+name: Firmware checks
+
+on:
+  push:
+    tags-ignore:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: Host regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch pinned flasher library for compatibility testing
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+          from urllib.request import urlopen
+
+          spec = importlib.util.spec_from_file_location("packager", "scripts/tools/package_web_flasher.py")
+          packager = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(packager)
+          with urlopen(packager.ESPTOOL_JS_URL, timeout=60) as response:
+              Path(os.environ["RUNNER_TEMP"], "esptool.mjs").write_bytes(response.read())
+          PY
+
+      - name: Run sanitized host and browser-code tests
+        env:
+          M45_ESPTOOL_BUNDLE: ${{ runner.temp }}/esptool.mjs
+        run: bash scripts/test-host.sh
+
+  firmware:
+    name: Firmware build and package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build firmware and web flasher
+        run: scripts/docker-web-flasher.sh
+
+      - name: Backup-pool regression tests against the SDK cJSON
+        run: |
+          docker run --rm --env HOME=/tmp/m45-home \
+            --user "$(id -u):$(id -g)" \
+            --volume "$GITHUB_WORKSPACE:/project" --workdir /project \
+            m45-gamma-firmware-build bash tests/run-backup-pools.sh
+
+      - name: Check package outputs
+        run: |
+          test -s dist/web-flasher/index.html
+          test -s dist/web-flasher/esp-miner.bin
+          test -s dist/web-flasher/canonical-releases.json
+          shopt -s nullglob
+          firmware=(dist/web-flasher/esp-miner-factory-602-*.bin)
+          test "${#firmware[@]}" -eq 1
+          test -s "${firmware[0]}"

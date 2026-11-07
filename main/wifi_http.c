@@ -56,7 +56,7 @@
 #define WIFI_TEST_ATTEMPTS 2
 #define WIFI_TEST_RESTORE_DELAY_MS 250
 #define SETTINGS_JSON_BUFFER_SIZE 8192
-#define HTTP_URI_HANDLER_SLOTS 64
+#define HTTP_URI_HANDLER_SLOTS 128
 #define HTTP_HANDLER_WARN_MS 100
 #define HTTP_JSON_BODY_DEADLINE_MS 30000
 #define LOG_CAPTURE_TIMEOUT_MS 5000
@@ -65,6 +65,8 @@
 #define OTA_UPLOAD_TOTAL_TIMEOUT_MS (5U * 60U * 1000U)
 #define AXEOS_UPLOAD_MAX_SIZE (16U * 1024U * 1024U)
 #define ASIC_POWER_TASK_STACK_BYTES 12288
+// Reboot handlers flush retained telemetry through NVS before restarting.
+#define REBOOT_TASK_STACK_BYTES 8192
 #define WWW_ERASE_CHUNK_SIZE (64U * 1024U)
 #define OTA_FACTORY_TABLE_OFFSET 0x8000
 #define OTA_FACTORY_TABLE_SIZE 0xC00
@@ -2348,7 +2350,7 @@ static esp_err_t setup_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, error_body, HTTPD_RESP_USE_STRLEN);
     }
 
-    if (xTaskCreate(reboot_task, "setup_reboot", 2048, NULL,
+    if (xTaskCreate(reboot_task, "setup_reboot", REBOOT_TASK_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "{\"error\":\"reboot task failed\"}");
@@ -2875,7 +2877,7 @@ static esp_err_t settings_factory_reset_handler(httpd_req_t *req)
         return httpd_resp_send(req, error_body, HTTPD_RESP_USE_STRLEN);
     }
 
-    if (xTaskCreate(factory_reset_reboot_task, "factory_reboot", 2048, NULL,
+    if (xTaskCreate(factory_reset_reboot_task, "factory_reboot", REBOOT_TASK_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "{\"error\":\"reboot task failed\"}");
@@ -3135,7 +3137,7 @@ static esp_err_t ota_install_handler(httpd_req_t *req, bool install_axeos)
                                    "firmware installed but incompatible settings erase failed");
         }
     }
-    if (xTaskCreate(reboot_task, "ota_reboot", 2048, NULL,
+    if (xTaskCreate(reboot_task, "ota_reboot", REBOOT_TASK_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         return send_json_error(req, "500 Internal Server Error", "reboot task failed");
     }
@@ -3258,7 +3260,10 @@ static void factory_reset_reboot_task(void *arg)
 
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
-    xTaskCreate(reboot_task, "web_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL);
+    if (xTaskCreate(reboot_task, "web_reboot", REBOOT_TASK_STACK_BYTES, NULL,
+                    tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+        return send_json_error(req, "500 Internal Server Error", "reboot task failed");
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
 }
@@ -3284,7 +3289,7 @@ static esp_err_t axeos_return_handler(httpd_req_t *req)
         return send_json_error(req, "500 Internal Server Error",
                                "retained AxeOS firmware could not be selected");
     }
-    if (xTaskCreate(reboot_task, "axeos_return", 2048, NULL,
+    if (xTaskCreate(reboot_task, "axeos_return", REBOOT_TASK_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         return send_json_error(req, "500 Internal Server Error",
                                "reboot task failed");
@@ -3968,7 +3973,7 @@ static esp_err_t espminer_wifi_scan_handler(httpd_req_t *req)
 
 static esp_err_t espminer_restart_handler(httpd_req_t *req)
 {
-    if (xTaskCreate(reboot_task, "api_restart", 2048, NULL,
+    if (xTaskCreate(reboot_task, "api_restart", REBOOT_TASK_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
         return send_espminer_json_error(req, "500 Internal Server Error",
                                         "reboot task failed");
@@ -4360,6 +4365,26 @@ static esp_err_t faults_get_handler(httpd_req_t *req)
         free(entries);
         return send_json_error(req, "500 Internal Server Error", "out of memory");
     }
+    m45_telemetry_extrema_t extrema;
+    bitaxe_gamma602_telemetry_extrema(&extrema);
+    cJSON *stats = cJSON_AddObjectToObject(root, "extrema");
+    if (stats == NULL ||
+        (extrema.vin_valid
+             ? cJSON_AddNumberToObject(stats, "vin_min_v", extrema.vin_min_v)
+             : cJSON_AddNullToObject(stats, "vin_min_v")) == NULL ||
+        (extrema.vin_valid
+             ? cJSON_AddNumberToObject(stats, "vin_max_v", extrema.vin_max_v)
+             : cJSON_AddNullToObject(stats, "vin_max_v")) == NULL ||
+        (extrema.tps_temp_valid
+             ? cJSON_AddNumberToObject(stats, "tps_temp_max_c", extrema.tps_temp_max_c)
+             : cJSON_AddNullToObject(stats, "tps_temp_max_c")) == NULL ||
+        (extrema.asic_temp_valid
+             ? cJSON_AddNumberToObject(stats, "asic_temp_max_c", extrema.asic_temp_max_c)
+             : cJSON_AddNullToObject(stats, "asic_temp_max_c")) == NULL) {
+        cJSON_Delete(root);
+        free(entries);
+        return send_json_error(req, "500 Internal Server Error", "out of memory");
+    }
     cJSON *array = cJSON_AddArrayToObject(root, "faults");
     if (array == NULL) {
         cJSON_Delete(root);
@@ -4411,6 +4436,16 @@ static esp_err_t fault_remove_handler(httpd_req_t *req)
     }
     if (err != ESP_OK) {
         return send_json_error(req, "500 Internal Server Error", "fault remove failed");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t extrema_clear_handler(httpd_req_t *req)
+{
+    const esp_err_t err = bitaxe_gamma602_clear_telemetry_extrema();
+    if (err != ESP_OK) {
+        return send_json_error(req, "500 Internal Server Error", "extremes clear failed");
     }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -4567,6 +4602,8 @@ static esp_err_t start_http_server(void)
          .handler = fault_remove_handler},
         {.uri = "/api/faults/clear", .method = HTTP_POST,
          .handler = faults_clear_handler},
+        {.uri = "/api/extrema/clear", .method = HTTP_POST,
+         .handler = extrema_clear_handler},
         {.uri = "/health", .method = HTTP_GET, .handler = health_handler},
         {.uri = "/generate_204", .method = HTTP_GET,
          .handler = captive_portal_redirect_handler},

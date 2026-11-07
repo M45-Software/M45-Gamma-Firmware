@@ -8,5 +8,6 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
     "$repo_dir/tests/fault_diagnostics_test.c" "$repo_dir/main/tps546_diagnostics.c" \
     "$repo_dir/main/m45_fault_log.c" "$repo_dir/main/m45_error_log.c" \
     "$repo_dir/main/m45_fault_context.c" \
+    "$repo_dir/main/m45_telemetry_extrema.c" \
     "$repo_dir/main/m45_log_buffer.c" -o "$test_bin"
 "$test_bin"

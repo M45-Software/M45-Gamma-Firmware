@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This tree uses only repository/SDK components. Keep registry resolution off
+# in Ninja's bootloader subprocesses as well as the application configuration.
+export IDF_COMPONENT_MANAGER=0
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 SDKCONFIG="${M45_SDKCONFIG:-$REPO_DIR/sdkconfig}"

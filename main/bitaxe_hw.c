@@ -13,6 +13,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "asic_frequency_transition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -22,6 +23,7 @@
 #include "m45_auto_clock_voltage.h"
 #include "m45_fault_log.h"
 #include "m45_fault_context.h"
+#include "m45_telemetry_extrema_store.h"
 #include "mining.h"
 #include "asic_serial.h"
 #include "stratum_minimal.h"
@@ -49,6 +51,7 @@
 #define ASIC_TEMP_STARTUP_GRACE_MS 3000
 #define ASIC_TEMP_NO_READING_C 127.0f
 #define ASIC_TEMP_NO_READING_LOG_MS 5000
+#define ASIC_TEMP_UNAVAILABLE_TIMEOUT_US 5000000
 #define ASIC_TEMP_VOLTAGE_UPDATE_DEADBAND_MV 5
 #define AUTO_CLOCK_INTERVAL_MS 5000
 #define AUTO_CLOCK_PRESET_MIN_MHZ 50
@@ -89,6 +92,7 @@ static SemaphoreHandle_t g_asic_transition_lock;
 static portMUX_TYPE g_asic_transition_lock_init_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint16_t g_commanded_voltage_mv = 0;
 static TickType_t g_asic_temp_grace_until;
+static int64_t g_asic_temp_unavailable_since_us = -1;
 static TickType_t g_asic_temp_no_reading_log_next;
 static TickType_t g_auto_clock_mining_ready_since;
 static uint32_t g_mining_gate_job_sent_baseline;
@@ -99,6 +103,9 @@ static bitaxe_gamma602_power_snapshot_t g_power_snapshot = {0};
 // Diagnostic samples outlive a power transition; their ages distinguish old
 // readings from a current measurement when a restart/read attempt fails.
 static m45_fault_context_t g_fault_context;
+static m45_telemetry_extrema_t g_telemetry_extrema;
+static pthread_mutex_t g_extrema_persist_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool g_extrema_restore_pending;
 _Static_assert(M45_FAULT_MESSAGE_MAX + 1 >=
                    M45_FAULT_CONTEXT_BYTES + M45_FAULT_REASON_MIN_BYTES,
                "fault record must fit the cause and operating context");
@@ -223,6 +230,102 @@ static esp_err_t asic_reset_pulse(void)
     return ESP_OK;
 }
 
+static void persist_telemetry_extrema(void)
+{
+    pthread_mutex_lock(&g_extrema_persist_lock);
+    if (g_extrema_restore_pending) {
+        m45_telemetry_extrema_t saved;
+        const esp_err_t restore_err = m45_telemetry_extrema_load(&saved);
+        if (restore_err != ESP_OK) {
+            pthread_mutex_unlock(&g_extrema_persist_lock);
+            ESP_LOGW(TAG, "telemetry extremes restore pending: %s", esp_err_to_name(restore_err));
+            return;
+        }
+        // Observations collected while storage was unavailable augment the
+        // restored record; they must never replace older, more extreme values.
+        portENTER_CRITICAL(&g_power_snapshot_lock);
+        if (saved.vin_valid) {
+            m45_telemetry_extrema_vin(&g_telemetry_extrema, saved.vin_min_v);
+            m45_telemetry_extrema_vin(&g_telemetry_extrema, saved.vin_max_v);
+        }
+        if (saved.tps_temp_valid) {
+            m45_telemetry_extrema_tps_temp(&g_telemetry_extrema, saved.tps_temp_max_c);
+        }
+        if (saved.asic_temp_valid) {
+            m45_telemetry_extrema_asic_temp(&g_telemetry_extrema, saved.asic_temp_max_c);
+        }
+        portEXIT_CRITICAL(&g_power_snapshot_lock);
+        g_extrema_restore_pending = false;
+    }
+    m45_telemetry_extrema_t extrema;
+    bitaxe_gamma602_telemetry_extrema(&extrema);
+    const esp_err_t err = m45_telemetry_extrema_save(&extrema);
+    pthread_mutex_unlock(&g_extrema_persist_lock);
+    if (err != ESP_OK) ESP_LOGW(TAG, "failed to save telemetry extremes: %s", esp_err_to_name(err));
+}
+
+static void extrema_persist_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        persist_telemetry_extrema();
+    }
+}
+
+esp_err_t bitaxe_gamma602_telemetry_extrema_init(void)
+{
+    m45_telemetry_extrema_t extrema;
+    esp_err_t err = m45_telemetry_extrema_load(&extrema);
+    g_extrema_restore_pending = err != ESP_OK;
+    if (err != ESP_OK) {
+        // Bad/missing storage must not block hardware protection or startup.
+        ESP_LOGW(TAG, "telemetry extremes unavailable: %s", esp_err_to_name(err));
+    }
+    portENTER_CRITICAL(&g_power_snapshot_lock);
+    g_telemetry_extrema = extrema;
+    portEXIT_CRITICAL(&g_power_snapshot_lock);
+    ESP_RETURN_ON_ERROR(esp_register_shutdown_handler(persist_telemetry_extrema), TAG,
+                        "register telemetry save on reboot failed");
+    if (xTaskCreate(extrema_persist_task, "extrema_save", 4096, NULL,
+                    tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+        (void)esp_unregister_shutdown_handler(persist_telemetry_extrema);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t bitaxe_gamma602_clear_telemetry_extrema(void)
+{
+    // Serialize against background/reboot saves. Publish the cleared state only
+    // after NVS commits, so failed clears preserve both RAM and saved records.
+    pthread_mutex_lock(&g_extrema_persist_lock);
+    const m45_telemetry_extrema_t empty = {0};
+    const esp_err_t err = m45_telemetry_extrema_save(&empty);
+    if (err == ESP_OK) {
+        g_extrema_restore_pending = false;
+        portENTER_CRITICAL(&g_power_snapshot_lock);
+        g_telemetry_extrema = empty;
+        portEXIT_CRITICAL(&g_power_snapshot_lock);
+    }
+    pthread_mutex_unlock(&g_extrema_persist_lock);
+    return err;
+}
+
+static void remember_power_extrema(const TPS546_StatusSnapshot *snapshot)
+{
+    // Keep valid raw fields even when a later register read fails or a safety
+    // limit is exceeded. Never record zero-filled unread fields as measurements.
+    portENTER_CRITICAL(&g_power_snapshot_lock);
+    if (snapshot->valid & (1U << TPS546_FIELD_VIN)) {
+        m45_telemetry_extrema_vin(&g_telemetry_extrema, snapshot->read_vin);
+    }
+    if (snapshot->valid & (1U << TPS546_FIELD_TEMP)) {
+        m45_telemetry_extrema_tps_temp(&g_telemetry_extrema, (float)snapshot->read_temp1);
+    }
+    portEXIT_CRITICAL(&g_power_snapshot_lock);
+}
+
 static void remember_fault_power_sample(const TPS546_StatusSnapshot *snapshot)
 {
     if (snapshot->read_error != ESP_OK ||
@@ -242,6 +345,7 @@ static void remember_fault_asic_temperature(float temp_c)
     const uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000;
     portENTER_CRITICAL(&g_power_snapshot_lock);
     m45_fault_context_remember_asic_temp(&g_fault_context, now_ms, temp_c);
+    m45_telemetry_extrema_asic_temp(&g_telemetry_extrema, temp_c);
     portEXIT_CRITICAL(&g_power_snapshot_lock);
 }
 
@@ -839,6 +943,8 @@ static void safety_shutdown(GlobalState *state, char *reason, size_t reason_size
                  esp_err_to_name(shutdown_err));
     }
     set_hw_status("safety shutdown");
+    // Flash writes follow reset/output-off, so saving cannot delay protection.
+    persist_telemetry_extrema();
     if (m45_fault_log_record(reason) != ESP_OK) {
         ESP_LOGW(TAG, "failed to persist safety fault");
     }
@@ -880,6 +986,9 @@ static esp_err_t fail_regulator_safety(GlobalState *state,
                                        const TPS546_StatusSnapshot *snapshot,
                                        const char *fmt, ...)
 {
+    if (snapshot != NULL) {
+        remember_power_extrema(snapshot);
+    }
     char message[M45_FAULT_MESSAGE_MAX + 1];
     va_list args;
     va_start(args, fmt);
@@ -978,6 +1087,25 @@ static esp_err_t validate_regulator_safety(GlobalState *state,
     return ESP_OK;
 }
 
+static esp_err_t unavailable_asic_temperature(GlobalState *state, float temp_c)
+{
+    log_asic_temp_no_reading(temp_c);
+    if (domain_reboot_recovery_pending() ||
+        xTaskGetTickCount() < g_asic_temp_grace_until) {
+        g_asic_temp_unavailable_since_us = -1;
+        return ESP_ERR_INVALID_STATE;
+    }
+    const int64_t now_us = esp_timer_get_time();
+    if (g_asic_temp_unavailable_since_us < 0) {
+        g_asic_temp_unavailable_since_us = now_us;
+    }
+    if (now_us - g_asic_temp_unavailable_since_us >= ASIC_TEMP_UNAVAILABLE_TIMEOUT_US) {
+        safety_shutdownf(state, "ASIC temperature unavailable for 5000ms; last invalid read %.3fC", temp_c);
+        return ESP_FAIL;
+    }
+    return ESP_ERR_INVALID_STATE;
+}
+
 static esp_err_t update_asic_temperature(GlobalState *state, float *temp_c)
 {
     esp_err_t err = bitaxe_fan_read_asic_temp_c(temp_c);
@@ -999,14 +1127,12 @@ static esp_err_t update_asic_temperature(GlobalState *state, float *temp_c)
     }
 
     if (asic_temp_is_no_reading(*temp_c)) {
-        log_asic_temp_no_reading(*temp_c);
-        return ESP_ERR_INVALID_STATE;
+        return unavailable_asic_temperature(state, *temp_c);
     }
 
     *temp_c += (float)state->DEVICE_CONFIG.temp_offset;
     if (asic_temp_is_no_reading(*temp_c)) {
-        log_asic_temp_no_reading(*temp_c);
-        return ESP_ERR_INVALID_STATE;
+        return unavailable_asic_temperature(state, *temp_c);
     }
 
     if (!isfinite(*temp_c)) {
@@ -1023,6 +1149,7 @@ static esp_err_t update_asic_temperature(GlobalState *state, float *temp_c)
         return ESP_FAIL;
     }
 
+    g_asic_temp_unavailable_since_us = -1;
     remember_fault_asic_temperature(*temp_c);
     const float asic_temp_shutdown_c =
         (float)m45_config_get()->safety_asic_temp_max_c;
@@ -1784,9 +1911,7 @@ static esp_err_t capture_power_snapshot(GlobalState *state,
     while (true) {
         memset(snapshot, 0, sizeof(*snapshot));
         const esp_err_t err = TPS546_snapshot_status(snapshot);
-        if (err == ESP_OK) {
-            remember_fault_power_sample(snapshot);
-        }
+        remember_power_extrema(snapshot);
         // A failed later register read must not hide unsafe values already
         // sampled. Valid bits prevent unread fields being treated as zero.
         bool settled = false;
@@ -1798,6 +1923,10 @@ static esp_err_t capture_power_snapshot(GlobalState *state,
         }
         const int64_t elapsed_us = esp_timer_get_time() - started_us;
         if (err == ESP_OK) {
+            // A latched TPS fault may already have stopped the output before
+            // this read. Keep its readback in the cause, not in the retained
+            // operating sample used to explain conditions before the trip.
+            remember_fault_power_sample(snapshot);
             store_power_snapshot(snapshot);
             if (retrying) {
                 log_tps_read_retry(state, snapshot, "recovered", (unsigned)(elapsed_us / 1000));
@@ -2183,6 +2312,7 @@ static esp_err_t initialize_hardware_unlocked(GlobalState *state)
 
 static esp_err_t bitaxe_gamma602_start_hardware_unlocked(GlobalState *state)
 {
+    g_asic_temp_unavailable_since_us = -1;
     if (state->SYSTEM_MODULE.hardware_fault) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -2487,6 +2617,16 @@ const char *bitaxe_gamma602_status(void)
 const char *bitaxe_gamma602_tps_model(void)
 {
     return TPS546_model();
+}
+
+void bitaxe_gamma602_telemetry_extrema(m45_telemetry_extrema_t *extrema)
+{
+    if (extrema == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&g_power_snapshot_lock);
+    *extrema = g_telemetry_extrema;
+    portEXIT_CRITICAL(&g_power_snapshot_lock);
 }
 
 bool bitaxe_gamma602_power_snapshot(bitaxe_gamma602_power_snapshot_t *snapshot)

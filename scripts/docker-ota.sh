@@ -5,7 +5,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
 IMAGE="${M45_DOCKER_IMAGE:-m45-gamma-firmware-build}"
-IDF_VERSION="${M45_IDF_VERSION:-v5.5.3}"
+IDF_VERSION="${M45_IDF_VERSION:-v5.5.6}"
 BUILD_IMAGE=1
 BUILD_DIR="build/docker"
 OUTPUT_DIR="dist/ota"

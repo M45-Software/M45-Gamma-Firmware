@@ -66,7 +66,12 @@ void app_main(void)
         ESP_LOGW(TAG, "backup list unavailable: %s; primary pool remains available",
                  esp_err_to_name(ret));
     }
-    ESP_ERROR_CHECK(m45_fault_log_init());
+    ret = m45_fault_log_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "fault history unavailable: %s; will retry before recording",
+                 esp_err_to_name(ret));
+    }
+    ESP_ERROR_CHECK(bitaxe_gamma602_telemetry_extrema_init());
     bitaxe_gamma602_init_state(&g_state);
 
     ret = bitaxe_gamma602_start_fan(&g_state);

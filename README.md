@@ -171,6 +171,10 @@ unread values are explicitly unavailable. Date/time is displayed in the
 browser's time zone with boot uptime, or a clock-not-synchronized notice for
 events before time sync. Each entry has an individual remove button and a
 Clear All action. Existing fault history is retained when upgrading.
+Updates publish one small history index after staging a new record. Interrupted
+updates retain a complete old or new history, including during migration from
+older firmware. A failed history/extrema load is retried without overwriting the
+unread data; a manual clear can explicitly reset it.
 
 The Logs page also shows the last 64 error-level log entries captured since the
 firmware started, even when the page was closed. This RAM-only history resets
@@ -178,6 +182,17 @@ on reboot, retains messages up to 2 KiB, and reports omitted entries and
 truncated messages. Informational/warning logs remain in the live log view.
 Wi-Fi starts ongoing SNTP clock synchronization for both plain and TLS pools;
 clock sync does not delay mining on plain connections.
+
+The Logs page shows the lowest and highest input voltage and the highest TPS
+and ASIC temperatures observed since the last manual clear. These use raw valid sensor reads,
+including fault-bearing and partially successful TPS reads, rather than rolling
+averages. They remain available after ASIC shutdown and while the browser is
+closed, and are saved across reboots. **Clear Extremes** starts a new recording
+period without removing fault history. Recording resumes with the next valid
+sensor reading. Changes are saved in the background once per second, and flushed
+after a safety shutdown and before a normal firmware reboot. Sudden power loss
+can lose up to the most recent second of observations. Missing readings
+show `--`. These are observed extremes, not guaranteed hardware trip peaks.
 
 ### Network Trust And Exposure
 
@@ -223,7 +238,7 @@ Build the static web flasher package:
 scripts/docker-web-flasher.sh
 ```
 
-If ESP-IDF `v5.5.3` is installed locally:
+If ESP-IDF `v5.5.6` is installed locally:
 
 ```sh
 scripts/build.sh --build
@@ -233,6 +248,11 @@ scripts/build.sh --flash /dev/ttyUSB0
 `scripts/build.sh --help` lists all build-time configuration options.
 
 ### Host Checks
+
+Run `bash scripts/test-host.sh` for the host regression suite. Set
+`M45_ESPTOOL_BUNDLE` to a downloaded copy of the pinned esptool-js `bundle.js`
+with an `.mjs` extension to include the real-library flasher compatibility test.
+CI runs this suite and a full firmware/package build on pushes and pull requests.
 
 With `IDF_PATH` pointing to an ESP-IDF checkout, run
 `tests/run-backup-pools.sh` to check backup-list validation, persistence, failure
@@ -245,13 +265,21 @@ Run `tests/run-fault-diagnostics.sh` for sanitized host checks of TPS diagnostic
 formatting, retained pre-error telemetry, legacy history migration, timestamp
 persistence, and error capture with live logging inactive.
 
+Run `python3 tests/run-telemetry-extrema-store.py` for sanitized checks of
+persistence across reboot, manual clear, storage-failure retention/retry, and
+skipping unchanged flash writes.
+
+Run `python3 tests/run-asic-temperature.py` for checks of the missing-temperature
+timeout, startup/recovery grace, valid-read recovery, and immediate hard faults.
+
 Run `python3 tests/run-hardware-startup.py`,
 `python3 tests/run-tps-read-retry.py`, `python3 tests/run-asic-rx-quiesce.py`,
 `tests/run-tps-readback.sh`, and `tests/run-chip-detection.sh` for sanitized
 checks covering the read grace window, hard-fault exclusions, startup failures,
 UART reader quiescence, and bounded chip detection with malformed traffic.
 
-Run `node --test tests/dashboard-faults.test.cjs` for dashboard checks covering
+Run `node --test tests/dashboard-faults.test.cjs tests/logging-extrema.test.cjs`
+for dashboard checks covering
 failed startup banners, manual retry availability, safety shutdown controls,
 and dismissal of separate fault occurrences.
 
@@ -275,6 +303,9 @@ A successful read clears the transient condition. If reads remain unavailable
 for the full window, the firmware shuts down and the dashboard shows the reason.
 A read transaction already in progress may finish after the retry deadline.
 Confirmed unsafe readings and regulator fault flags still shut down immediately.
+ASIC temperature sentinel/no-reading values get a five-second observation
+window after startup grace or an active domain-recovery period ends. A valid
+temperature clears that window; persistent unavailable readings stop the ASIC.
 Fan, memory, writes, and other initialization failures do not use this read grace.
 Failed ASIC detection during a runtime startup permits a manual **Turn On** retry.
 
@@ -284,6 +315,15 @@ diagnostic log. Sample ages identify older readings, and missing readings are
 marked unavailable. Read recovery or exhaustion is logged. Dismissing a
 dashboard fault hides that occurrence for the current page visit; a new failure
 or page visit shows it again.
+
+TPS fault records distinguish the fault-status **readback** from the **last
+validated TPS** operating sample retained before that read. A fault-bearing
+read does not replace the retained sample. Hardware protection may trip between
+monitor polls, so readback voltage/current may already have fallen or recovered
+when the fault flags are read. Neither sample is a captured trip peak; latched
+fault flags can therefore report a trip even when readback values are within
+the configured limits. The formatted record is captured before software
+shutdown clears live telemetry.
 
 These limits are last-resort protections, not a substitute for proper cooling,
 power delivery, and monitoring. Unrestricted safety-limit ranges are available

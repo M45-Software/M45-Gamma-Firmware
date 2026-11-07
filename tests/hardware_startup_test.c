@@ -37,6 +37,7 @@ typedef struct {
 typedef struct { bool overclock_enabled, asic_voltage_temp_compensation_enabled; unsigned safety_asic_temp_max_c; } m45_config_t;
 static const m45_config_t config = {.safety_asic_temp_max_c = 69};
 static TickType_t tick, off_tick, g_asic_temp_grace_until, g_domain_reboot_grace_until;
+static int64_t g_asic_temp_unavailable_since_us;
 static bool g_regulator_enabled, g_tps546_ready, off_recorded;
 static bool work_paused;
 static uint16_t g_commanded_voltage_mv;

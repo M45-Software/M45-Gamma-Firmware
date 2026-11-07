@@ -53,6 +53,15 @@
 <div class=subvalue>Scan the local network or add a miner by address.</div></article></section>
 </section></section>
 <section id=logs-view class=hidden>
+<article class='panel full fault-history'><div class=log-head><div><div class=label>Recorded Extremes</div>
+<div class=subvalue>Saved across reboots. Clear to start a new recording period.</div></div>
+<button id=extrema-clear class=secondary type=button>Clear Extremes</button></div>
+<div class=summary-grid>
+<section class=summary-item><div class=summary-label>Lowest Input Voltage</div><div id=logs-vin-min class=summary-value>--</div></section>
+<section class=summary-item><div class=summary-label>Highest Input Voltage</div><div id=logs-vin-max class=summary-value>--</div></section>
+<section class=summary-item><div class=summary-label>Highest TPS Temperature</div><div id=logs-tps-max class=summary-value>--</div></section>
+<section class=summary-item><div class=summary-label>Highest ASIC Temperature</div><div id=logs-asic-max class=summary-value>--</div></section>
+</div></article>
 <article class='panel full fault-history'><div class=log-head><div><div class=label>Fault History</div>
 <div class=subvalue>Last eight hardware/safety faults, saved across reboots. Times use your browser time zone.</div></div>
 <button id=faults-clear class=danger type=button>Clear All</button></div>

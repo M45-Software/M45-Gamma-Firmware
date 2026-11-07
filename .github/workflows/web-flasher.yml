@@ -24,9 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build firmware and web flasher package
         env:
@@ -39,7 +40,7 @@ jobs:
           fi
 
       - name: Upload web flasher artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: m45-web-flasher
           path: dist/web-flasher

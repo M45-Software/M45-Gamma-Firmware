@@ -1015,8 +1015,20 @@ const when=document.createElement('div');when.className='subvalue';when.textCont
 const remove=document.createElement('button');remove.type='button';remove.className='fault-history-remove';remove.title='Remove fault';remove.setAttribute('aria-label','Remove fault');remove.textContent='×';
 remove.onclick=async()=>{remove.disabled=true;try{const r=await fetch('/api/faults/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:f.id})});if(!r.ok)throw new Error(r.status);await refreshFaults()}catch(e){remove.disabled=false;setLogStatus('FAULT REMOVE FAILED','warn')}};
 row.append(text,remove);list.appendChild(row)})}
+function renderExtrema(e={}){const value=(v,d,unit)=>typeof v==='number'&&Number.isFinite(v)?`${v.toFixed(d)} ${unit}`:'--';
+txt('logs-vin-min',value(e?.vin_min_v,3,'V'));txt('logs-vin-max',value(e?.vin_max_v,3,'V'));
+txt('logs-tps-max',value(e?.tps_temp_max_c,1,'°C'));txt('logs-asic-max',value(e?.asic_temp_max_c,1,'°C'))}
 let faultsInFlight=false;
-async function refreshFaults(){if(faultsInFlight)return;faultsInFlight=true;try{const r=await fetch('/api/faults',{cache:'no-store'});if(!r.ok)throw new Error(r.status);const j=await r.json();renderFaults(Array.isArray(j.faults)?j.faults:[])}catch(e){const list=$('faults-list');list.textContent='Unable to load fault history.'}finally{faultsInFlight=false}}
+let faultsRefreshGeneration=0;
+async function refreshFaults(){if(faultsInFlight)return;faultsInFlight=true;const generation=faultsRefreshGeneration;
+try{const r=await fetch('/api/faults',{cache:'no-store'});if(!r.ok)throw new Error(r.status);const j=await r.json();
+if(generation!==faultsRefreshGeneration)return;renderExtrema(j.extrema);renderFaults(Array.isArray(j.faults)?j.faults:[])}
+catch(e){if(generation===faultsRefreshGeneration){renderExtrema();$('faults-list').textContent='Unable to load fault history.'}}
+finally{faultsInFlight=false;if(generation!==faultsRefreshGeneration)refreshFaults()}}
+async function clearExtrema(){if(!confirm('Clear recorded voltage and temperature extremes?'))return;const btn=$('extrema-clear');btn.disabled=true;
+try{const r=await fetch('/api/extrema/clear',{method:'POST'});if(!r.ok)throw new Error(r.status);++faultsRefreshGeneration;renderExtrema();await refreshFaults()}
+catch(e){setLogStatus('EXTREMES CLEAR FAILED','warn')}finally{btn.disabled=false}}
+$('extrema-clear').onclick=clearExtrema;
 let errorsInFlight=false;
 async function refreshErrors(){if(routeView()!=='logs'||errorsInFlight)return;errorsInFlight=true;
 try{const r=await fetch('/api/errors',{cache:'no-store'});if(!r.ok)throw new Error(r.status);const j=await r.json(),items=Array.isArray(j.errors)?j.errors:[],list=$('errors-list');list.innerHTML='';

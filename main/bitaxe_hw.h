@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "global_state.h"
 #include "m45_config.h"
+#include "m45_telemetry_extrema.h"
 
 typedef struct {
     bool valid;
@@ -79,5 +80,8 @@ uint8_t bitaxe_gamma602_chip_count(void);
 const char *bitaxe_gamma602_status(void);
 const char *bitaxe_gamma602_tps_model(void);
 bool bitaxe_gamma602_power_snapshot(bitaxe_gamma602_power_snapshot_t *snapshot);
+void bitaxe_gamma602_telemetry_extrema(m45_telemetry_extrema_t *extrema);
+esp_err_t bitaxe_gamma602_telemetry_extrema_init(void);
+esp_err_t bitaxe_gamma602_clear_telemetry_extrema(void);
 void bitaxe_gamma602_safety_limits(bitaxe_gamma602_safety_limits_t *limits);
 void bitaxe_gamma602_auto_clock_status(bitaxe_gamma602_auto_clock_status_t *status);

@@ -11,7 +11,7 @@ import sys
 DEFAULT_NAME = "M45 Gamma Firmware"
 DEFAULT_BOARD_VERSION = "602"
 REPO_URL = "https://github.com/M45Core/M45-Gamma-Firmware"
-ESPTOOL_JS_URL = "https://unpkg.com/esptool-js@0.4.6/bundle.js"
+ESPTOOL_JS_URL = "https://unpkg.com/esptool-js@0.7.1/bundle.js"
 NVS_START = 0x9000
 NVS_SIZE = 0x6000
 PARTITION_TABLE_OFFSET = 0x8000
@@ -332,22 +332,22 @@ async function fetchFirmware(release) {
   return firmware;
 }
 
-function flashParts(firmwareBinaryString, keepConfig) {
+function flashParts(firmwareBytes, keepConfig) {
   if (keepConfig) {
     return [
       {
-        data: firmwareBinaryString.slice(0, CONFIG.nvsStart),
+        data: firmwareBytes.slice(0, CONFIG.nvsStart),
         address: 0,
       },
       {
-        data: firmwareBinaryString.slice(NVS_END),
+        data: firmwareBytes.slice(NVS_END),
         address: NVS_END,
       },
     ];
   }
   return [
     {
-      data: firmwareBinaryString,
+      data: firmwareBytes,
       address: 0,
     },
   ];
@@ -396,14 +396,10 @@ async function flashFirmware() {
 
     setStatus(`Downloading ${selected.version}...`);
     const firmwareArrayBuffer = await fetchFirmware(selected);
-    const firmwareUint8Array = new Uint8Array(firmwareArrayBuffer);
-    const firmwareBinaryString = Array.from(
-      firmwareUint8Array,
-      (byte) => String.fromCharCode(byte)
-    ).join("");
+    const firmwareBytes = new Uint8Array(firmwareArrayBuffer);
 
     const keepConfig = !eraseSettings.checked;
-    const parts = flashParts(firmwareBinaryString, keepConfig);
+    const parts = flashParts(firmwareBytes, keepConfig);
     setStatus("Flashing 0%...");
 
     await loader.writeFlash({

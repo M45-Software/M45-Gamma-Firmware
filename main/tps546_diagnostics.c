@@ -91,7 +91,9 @@ void TPS546_format_snapshot(const TPS546_StatusSnapshot *s, char *dst, size_t si
     RAW(OPERATION, operation, "OP", "0x%02x");
     RAW(CONFIG, on_off_config, "CFG", "0x%02x");
 #undef RAW
-    append(dst, size, "sampled:");
+    // PMBus telemetry is read after status registers. A hardware trip can
+    // precede both reads, so these values cannot establish the trip's peak.
+    append(dst, size, "readback (not trip peak):");
 #define VALUE(field, member, label, format) \
     do { if (VALID(field)) append(dst, size, " " label "=" format, s->member); \
          else append(dst, size, " " label "=unavailable"); } while (0)

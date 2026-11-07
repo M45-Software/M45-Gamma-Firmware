@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16.0)
 
+# Components are supplied by ESP-IDF or this repository. Avoid registry/cache
+# writes into the SDK installation, which is read-only in non-root Docker runs.
+# The environment setting is also inherited by the bootloader sub-build.
+set(ENV{IDF_COMPONENT_MANAGER} 0)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 execute_process(

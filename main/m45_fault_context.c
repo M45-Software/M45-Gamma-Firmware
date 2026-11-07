@@ -102,7 +102,7 @@ void m45_fault_context_format(const m45_fault_context_t *context, uint64_t now_m
                  c->requested_voltage_mv > 0, "mV");
     append_value(details, sizeof(details), "commanded", c->commanded_voltage_mv,
                  c->commanded_voltage_mv > 0, "mV");
-    append(details, sizeof(details), "; last TPS");
+    append(details, sizeof(details), "; last validated TPS");
     if (c->power_valid) {
         append(details, sizeof(details), " age=%llums",
                (unsigned long long)sample_age_ms(now_ms, c->power_sample_ms));
