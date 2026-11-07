@@ -2,7 +2,7 @@ name: Firmware checks
 
 on:
   push:
-    tags-ignore:
+    branches:
       - '**'
   pull_request:
 
