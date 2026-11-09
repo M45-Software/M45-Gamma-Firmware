@@ -28,7 +28,7 @@ const LIMIT_RANGES={
 'limit-iout-warn':[5,33,0,LIMIT_MAX_DECIAMPS_A],
 'limit-iout-fault':[6,33,0,LIMIT_MAX_DECIAMPS_A]};
 const REFRESH_WARN_MS=10000;
-const UPDATE_WEB_FLASHER_URL='https://m45core.github.io/M45-Gamma-Firmware/';
+const UPDATE_WEB_FLASHER_URL='https://m45-software.github.io/M45-Gamma-Firmware/';
 const UPDATE_RELEASES_URL=`${UPDATE_WEB_FLASHER_URL}canonical-releases.json`,UPDATE_ASSET_PREFIX='esp-miner-factory-602-';
 const UPDATE_PRIVACY_KEY='m45_ignore_release_check_warning';
 const CAL_BASE_TIMEOUT_MS=180000,CAL_STEP_TIMEOUT_MS=90000,CAL_SAMPLE_POLL_MS=1000,CAL_BASE_SAMPLE_MS=20000,CAL_STEP_SAMPLE_MS=15000;

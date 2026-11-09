@@ -6,7 +6,7 @@ M45 is experimental firmware for Bitaxe Gamma 602 miners. It gives the Gamma a
 local web dashboard, QR-assisted setup, weighted multi-pool mining, and opt-in
 overclock controls while booting at stock ASIC settings by default.
 
-[Open the Web Flasher](https://m45core.github.io/M45-Gamma-Firmware/)
+[Open the Web Flasher](https://m45-software.github.io/M45-Gamma-Firmware/)
 to flash a prepared build from Chrome or Edge using USB serial.
 
 Use it at your own risk. Overclocking or bad cooling can permanently damage

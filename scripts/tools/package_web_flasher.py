@@ -10,7 +10,7 @@ import sys
 
 DEFAULT_NAME = "M45 Gamma Firmware"
 DEFAULT_BOARD_VERSION = "602"
-REPO_URL = "https://github.com/M45Core/M45-Gamma-Firmware"
+REPO_URL = "https://github.com/M45-Software/M45-Gamma-Firmware"
 ESPTOOL_JS_URL = "https://unpkg.com/esptool-js@0.7.1/bundle.js"
 NVS_START = 0x9000
 NVS_SIZE = 0x6000
