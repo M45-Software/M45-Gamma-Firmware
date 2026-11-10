@@ -5,7 +5,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
 IMAGE="${M45_DOCKER_IMAGE:-m45-gamma-firmware-build}"
-IDF_VERSION="${M45_IDF_VERSION:-v5.5.6}"
+IDF_VERSION="${M45_IDF_VERSION:-v5.5.6@sha256:bf72fe7a15c22849a9a94147301165a545fb8905d97c176cf748e3e4614cac84}"
 BUILD_IMAGE=1
 BUILD_DIR="build/docker"
 OUTPUT_DIR="dist/web-flasher"
@@ -21,7 +21,7 @@ Build firmware in Docker and produce a Bitaxe-style web flasher package.
 
 Options:
   --docker-image NAME   Image name to build and run (default: $IMAGE)
-  --idf-version TAG     espressif/idf tag to use (default: $IDF_VERSION)
+  --idf-version TAG     espressif/idf tag or tag@digest to use (default: $IDF_VERSION)
   --no-image-build      Reuse an existing local image
   --build-dir DIR       ESP-IDF build directory (default: $BUILD_DIR)
   --output DIR          Web flasher output directory (default: $OUTPUT_DIR)

@@ -209,7 +209,9 @@ substitute for network isolation.
 
 ### Build And Flash
 
-Docker is the easiest build path:
+Docker is the easiest build path. The default ESP-IDF 5.5.6 image is pinned
+to a verified digest. Use `--idf-version` or `M45_IDF_VERSION` to select another
+official SDK image tag or tag with digest.
 
 ```sh
 scripts/docker-build.sh
